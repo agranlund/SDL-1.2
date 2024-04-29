@@ -35,12 +35,17 @@
 /* Variables */
 
 extern Uint16 SDL_AtariXbios_installmousevector;	/* flag for SDL_AtariXbios_Install() */
+extern Uint16 SDL_AtariXbios_exclusivemousevector;	/* mouse if exclusive to application */
 extern volatile Uint16 SDL_AtariXbios_mouselock;	/* mouse lock position */
 extern volatile Uint16 SDL_AtariXbios_mouseb;	/* buttons */
 extern volatile Sint16 SDL_AtariXbios_mousex;	/* X relative motion */
 extern volatile Sint16 SDL_AtariXbios_mousey;	/* Y relative motion */
 extern Uint16 SDL_AtariXbios_installjoystickvector;	/* flag for SDL_AtariXbios_Install() */
+extern Uint16 SDL_AtariXbios_exclusivejoystickvector;	/* joystick is exclusive to application */
 extern volatile Uint16 SDL_AtariXbios_joystick;	/* Joystick */
+extern Uint16 SDL_AtariXbios_installkeyboardvector;	/* flag for SDL_AtariXbios_Install() */
+extern Uint16 SDL_AtariXbios_exclusivekeyboardvector;	/* keyboard is exclusive to application */
+extern volatile Uint8  SDL_AtariXbios_keyboard[128];	/* Keyboard table */
 
 /* Functions */ 
 
@@ -48,5 +53,6 @@ extern void SDL_AtariXbios_Install(void);
 extern void SDL_AtariXbios_Restore(void);
 extern void SDL_AtariXbios_MouseVector(void *buf);
 extern void SDL_AtariXbios_JoystickVector(void *buf);
+extern void SDL_AtariXbios_KeyboardVector(void *buf);
 
 #endif /* _SDL_XBIOSINTERRUPT_S_H_ */
