@@ -34,12 +34,17 @@
 	.globl	SYM(SDL_AtariXbios_Restore)
 
 	.globl	SYM(SDL_AtariXbios_installmousevector)
+	.globl	SYM(SDL_AtariXbios_exclusivemousevector)
 	.globl	SYM(SDL_AtariXbios_mouselock)
 	.globl	SYM(SDL_AtariXbios_mouseb)
 	.globl	SYM(SDL_AtariXbios_mousex)
 	.globl	SYM(SDL_AtariXbios_mousey)
 	.globl	SYM(SDL_AtariXbios_installjoystickvector)
+	.globl	SYM(SDL_AtariXbios_exclusivejoystickvector)
 	.globl	SYM(SDL_AtariXbios_joystick)
+	.globl	SYM(SDL_AtariXbios_installkeyboardvector)
+	.globl	SYM(SDL_AtariXbios_exclusivekeyboardvector)
+	.globl	SYM(SDL_AtariXbios_keyboard)
 
 	.globl	SYM(Atari_UnhookXbra)
 
@@ -98,6 +103,21 @@ no_new_mouse_vector:
 	movel	#newjoystickvector,a0@(24)
 #endif
 no_new_joystick_vector:
+
+	/* Save old keyboard vector, set our routine */
+
+	tstw	SYM(SDL_AtariXbios_installkeyboardvector)
+	beqs	no_new_keyboard_vector
+#if defined(__mcoldfire__)
+	movel	a0@(-4),a1
+	movel	a1,oldkeyboardvector
+	lea	newkeyboardvector(pc),a1
+	movel	a1,a0@(-4)
+#else
+	movel	a0@(-4),oldkeyboardvector
+	movel	#newkeyboardvector,a0@(-4)
+#endif
+no_new_keyboard_vector:
 
 	/* Restart interrupts */
 
@@ -176,6 +196,24 @@ no_restore_mouse:
 
 no_restore_joystick:
 
+	/* Restore keyboard vector */
+
+	tstl	oldkeyboardvector
+	beqs	no_restore_keyboard
+
+	movew	d1,sp@-
+
+	pea	newkeyboardvector(pc)
+	movel	#0x4c53444c,sp@-	/* "LSDL" */
+	pea	a0@(-4)
+	jsr	SYM(Atari_UnhookXbra)
+	lea	sp@(12),sp
+	clrl	oldkeyboardvector
+
+	movew	sp@+,d1
+
+no_restore_keyboard:
+
 	/* Restart interrupts */
 
 	movew	d1,sr
@@ -243,13 +281,18 @@ no_mouse_lock:
 	movel	sp@+,d0
 #endif
 
+	tst.w	SYM(SDL_AtariXbios_exclusivemousevector)
+	bne.b	skip_oldmousevector
 	movel	oldmousevector,sp@-
+skip_oldmousevector:
 	rts
 
 	.data
 
 	.even
 SYM(SDL_AtariXbios_installmousevector):
+	.dc.w	0
+SYM(SDL_AtariXbios_exclusivemousevector):
 	.dc.w	0
 SYM(SDL_AtariXbios_mouselock):
 	.dc.w	0
@@ -284,7 +327,10 @@ newjoystickvector:
 	/* Jump through old vector */
 	movel	sp@+,d0
 
+	tst.w	SYM(SDL_AtariXbios_exclusivejoystickvector)
+	bne.b	skip_oldjoystickvector
 	movel	oldjoystickvector,sp@-
+skip_oldjoystickvector:
 	rts
 
 	.data
@@ -292,5 +338,64 @@ newjoystickvector:
 	.even
 SYM(SDL_AtariXbios_installjoystickvector):
 	.dc.w	0
+SYM(SDL_AtariXbios_exclusivejoystickvector):
+	.dc.w	0
 SYM(SDL_AtariXbios_joystick):
 	.dc.w	0
+
+
+/*--- Our keyboard vector ---*/
+
+	.text
+
+	.even
+	.ascii "XBRA"
+	.ascii "LSDL"
+oldkeyboardvector:
+	.dc.l	0
+newkeyboardvector:
+
+#if defined(__mcoldfire__)
+	lea	sp@(-12),sp
+	moveml	d0-d1/a0,sp@
+#else
+	moveml	d0-d1/a0,sp@-
+#endif
+
+	moveb	d0,d1
+	lea		SYM(SDL_AtariXbios_keyboard),a0
+#if defined(__mcoldfire__)
+	andl	#0x7f,d1
+	btst	#7,d0
+	seq	d0
+	moveb	d0,a0@(0,d1:l)
+#else
+	andw	#0x7f,d1
+	btst	#7,d0
+	seq	a0@(0,d1:w)
+#endif
+
+	/* Jump through old vector */
+#if defined(__mcoldfire__)
+	moveml	sp@,d0-d1/a0
+	lea	sp@(12),sp
+#else
+	moveml	sp@+,d0-d1/a0
+#endif
+
+	tst.w	SYM(SDL_AtariXbios_exclusivekeyboardvector)
+	bne.b	skip_oldkeyboardvector
+	movel	oldkeyboardvector,sp@-
+skip_oldkeyboardvector:
+	rts
+
+	.data
+
+	.even
+SYM(SDL_AtariXbios_installkeyboardvector):
+	.dc.w	0
+SYM(SDL_AtariXbios_exclusivekeyboardvector):
+	.dc.w	0
+SYM(SDL_AtariXbios_keyboard):
+	.ds.b	128
+
