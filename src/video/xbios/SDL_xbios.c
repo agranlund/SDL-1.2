@@ -89,7 +89,12 @@ static long cookie_vdo;
 
 static int XBIOS_Available(void)
 {
-	long cookie_hade, cookie_scpn, cookie_fvdi;
+	long cookie_hade, cookie_scpn, cookie_fvdi, cookie_nova;
+
+	/* Nova graphic card */
+	if (Getcookie(C_NOVA, &cookie_nova) == C_FOUND) {
+		return 1;
+	}
 
 	/* Hades does not have neither Atari video chip nor compatible Xbios */
 	if (Getcookie(C_hade, &cookie_hade) == C_FOUND) {
@@ -203,26 +208,34 @@ static SDL_VideoDevice *XBIOS_CreateDevice(int devindex)
 
 	device->hidden->updRects = XBIOS_UpdateRects;
 
-	/* Setup device specific functions, default to ST for everything */
-	if (Getcookie(C__VDO, &cookie_cvdo) != C_FOUND) {
-		cookie_cvdo = VDO_ST << 16;
+	long cookie_nova;
+	if (Getcookie(C_NOVA, &cookie_nova) == C_FOUND)
+	{
+		SDL_XBIOS_VideoInit_Nova(device, (void *) cookie_nova);
 	}
-	SDL_XBIOS_VideoInit_ST(device, cookie_cvdo);
+	else
+	{
+		/* Setup device specific functions, default to ST for everything */
+		if (Getcookie(C__VDO, &cookie_cvdo) != C_FOUND) {
+			cookie_cvdo = VDO_ST << 16;
+		}
+		SDL_XBIOS_VideoInit_ST(device, cookie_cvdo);
 
-	switch (cookie_cvdo>>16) {
-		case VDO_ST:
-		case VDO_STE:
-			/* Already done as default */
-			break;
-		case VDO_TT:
-			SDL_XBIOS_VideoInit_TT(device);
-			break;
-		case VDO_F30:
-			SDL_XBIOS_VideoInit_F30(device);
-			break;
-		case VDO_MILAN:
-			SDL_XBIOS_VideoInit_Milan(device);
-			break;
+		switch (cookie_cvdo>>16) {
+			case VDO_ST:
+			case VDO_STE:
+				/* Already done as default */
+				break;
+			case VDO_TT:
+				SDL_XBIOS_VideoInit_TT(device);
+				break;
+			case VDO_F30:
+				SDL_XBIOS_VideoInit_F30(device);
+				break;
+			case VDO_MILAN:
+				SDL_XBIOS_VideoInit_Milan(device);
+				break;
+		}
 	}
 
 	return device;
@@ -681,10 +694,15 @@ static int XBIOS_FlipHWSurface(_THIS, SDL_Surface *surface)
 		src = surface->pixels + src_offset;
 		dst = ((Uint8 *) XBIOS_screens[XBIOS_fbnum]) + dst_offset;
 
-		for (i=0; i<surface->h; i++) {
-			SDL_memcpy(dst, src, surface->w * surface->format->BytesPerPixel);
-			src += surface->pitch;
-			dst += XBIOS_pitch;
+		if ((surface->pitch == XBIOS_pitch) && (surface->pitch == surface->w * surface->format->BytesPerPixel)) {
+			SDL_memcpy(dst, src, surface->h * surface->w * surface->format->BytesPerPixel);
+		}
+		else {
+			for (i=0; i<surface->h; i++) {
+				SDL_memcpy(dst, src, surface->w * surface->format->BytesPerPixel);
+				src += surface->pitch;
+				dst += XBIOS_pitch;
+			}
 		}
 	}
 

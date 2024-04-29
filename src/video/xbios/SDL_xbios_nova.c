@@ -32,6 +32,7 @@
 #include <fcntl.h>
 
 /* Mint includes */
+#include <gem.h>
 #include <mint/cookie.h>
 #include <mint/sysvars.h>
 #include <mint/osbind.h>
@@ -45,12 +46,24 @@
 
 #define NOVA_FILENAME	"\\auto\\sta_vdi.bib"
 
+/* Use shadow buffer on Nova */
+#define ENABLE_NOVA_SHADOWBUF
+
+/* Disabe gpu double buffer when using shadow buffer */
+/* This trades some amount of screen tearing for a */
+/* massive increase in performance. */
+#define DISABLE_NOVA_DOUBLEBUF	ENABLE_NOVA_SHADOWBUF
+
 /*--- ---*/
 
 static nova_xcb_t *NOVA_xcb;			/* Pointer to Nova infos */
 static nova_resolution_t *NOVA_modes;	/* Video modes loaded from a file */
 static int NOVA_modecount;				/* Number of loaded modes */
 static unsigned char NOVA_blnk_time;	/* Original blank time */
+static void* sav_framebuf;
+static int16_t sav_palette[256 * 3];
+static SDL_bool aes_present = SDL_FALSE;
+static GRECT desktop;
 
 /*--- Functions ---*/
 
@@ -60,7 +73,7 @@ static void listModes(_THIS, int actually_add);
 static void saveMode(_THIS, SDL_PixelFormat *vformat);
 static void setMode(_THIS, const xbiosmode_t *new_video_mode);
 static void restoreMode(_THIS);
-static void vsync_NOVA(_THIS);
+static void vsync(_THIS);
 static void getScreenFormat(_THIS, int bpp, Uint32 *rmask, Uint32 *gmask, Uint32 *bmask, Uint32 *amask);
 static int getLineWidth(_THIS, const xbiosmode_t *new_video_mode, int width, int bpp);
 static void swapVbuffers(_THIS);
@@ -70,6 +83,7 @@ static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors);
 
 /* Internal functions */
 
+static void NOVA_Vsync(_THIS);
 static void NOVA_SetMode(_THIS, int num_mode);
 static void NOVA_SetScreen(_THIS, void *screen);
 static void NOVA_SetColor(_THIS, int index, int r, int g, int b);
@@ -95,7 +109,7 @@ void SDL_XBIOS_VideoInit_Nova(_THIS, void *cookie_nova)
 	XBIOS_saveMode = saveMode;
 	XBIOS_setMode = setMode;
 	XBIOS_restoreMode = restoreMode;
-	XBIOS_vsync = vsync_NOVA;
+	XBIOS_vsync = vsync;
 	XBIOS_getScreenFormat = getScreenFormat;
 	XBIOS_getLineWidth = getLineWidth;
 	XBIOS_swapVbuffers = swapVbuffers;
@@ -133,15 +147,27 @@ static void listModes(_THIS, int actually_add)
 		modeinfo.width = width;
 		modeinfo.height = height;
 		modeinfo.depth = bpp;
+#ifdef ENABLE_NOVA_SHADOWBUF
+		modeinfo.flags = XBIOSMODE_SHADOWCOPY;
+#else
 		modeinfo.flags = 0;
-
+#endif
 		SDL_XBIOS_AddMode(this, actually_add, &modeinfo);
 	}
 }
 
 static void saveMode(_THIS, SDL_PixelFormat *vformat)
 {
-	int curwidth, curheight, curbpp;
+	int i, vdi_phys, curwidth, curheight, curbpp;
+	short dummy;
+
+	if (appl_init() >= 0) {
+		wind_update(BEG_UPDATE);
+		wind_update(BEG_MCTRL);
+		graf_mouse(M_OFF, NULL);
+		wind_get(0, WF_WORKXYWH, &desktop.g_x, &desktop.g_y, &desktop.g_w, &desktop.g_h);
+		aes_present = SDL_TRUE;
+	}
 
 	curwidth = NOVA_xcb->max_x + 1;
 	curheight = NOVA_xcb->max_y + 1;
@@ -162,9 +188,21 @@ static void saveMode(_THIS, SDL_PixelFormat *vformat)
 	this->info.video_mem = NOVA_xcb->mem_size;
 
 	XBIOS_oldvmode = NOVA_xcb->resolution;
-	XBIOS_oldvbase = NOVA_xcb->base;
+	XBIOS_oldvbase = NOVA_xcb->scr_base;
 
-	/* TODO: save palette ? */
+	/* Save framebuffer */
+	sav_framebuf = SDL_malloc(NOVA_xcb->scrn_sze);
+	if (sav_framebuf) {
+		SDL_memcpy(sav_framebuf, XBIOS_oldvbase, NOVA_xcb->scrn_sze);
+	}
+
+	/* save palette */
+	vdi_phys = aes_present ? graf_handle(&dummy, &dummy, &dummy, &dummy) : 0;
+	if (vdi_phys > 0 && NOVA_xcb->planes <= 8) {
+		for (i = 0; i < (1 << NOVA_xcb->planes); i++) {
+			vq_color(vdi_phys, i, 1, &sav_palette[i * 3]);
+		}
+	}
 
 	NOVA_blnk_time = NOVA_xcb->blnk_time;
 	NOVA_xcb->blnk_time = 0;
@@ -177,31 +215,35 @@ static void setMode(_THIS, const xbiosmode_t *new_video_mode)
 
 static void restoreMode(_THIS)
 {
-	NOVA_SetScreen(this, XBIOS_oldvbase);
+	int i, vdi_phys;
+	short dummy;
 	NOVA_SetMode(this, XBIOS_oldvmode);
+	NOVA_SetScreen(this, XBIOS_oldvbase);
+	NOVA_Vsync(this);
 
-	/* TODO: restore palette ? */
+	/* restore framebuffer */
+	if (sav_framebuf) {
+		SDL_memcpy(XBIOS_oldvbase, sav_framebuf, NOVA_xcb->scrn_sze);
+	}
+
+	/* restore palette */
+	vdi_phys = aes_present ? graf_handle(&dummy, &dummy, &dummy, &dummy) : 0;
+	if (vdi_phys > 0 && NOVA_xcb->planes <= 8) {
+		for (i = 0; i < (1 << NOVA_xcb->planes); i++) {
+			vs_color(vdi_phys, i, &sav_palette[i * 3]);
+		}
+	}
 
 	NOVA_xcb->blnk_time = NOVA_blnk_time;
-}
 
-static void vsync_NOVA(_THIS)
-{
-	void *oldstack;
-
-	oldstack = (void *)Super(NULL);
-
-	__asm__ __volatile__ (
-		"movel	%0,%%a0\n\t"
-		"jsr	%%a0@"
-		: /* no return value */
-		: /* input */
-		  "g"(NOVA_xcb->p_vsync)
-		: /* clobbered registers */
-		  "d0", "d1", "d2", "a0", "a1", "cc", "memory"
-		);
-
-	SuperToUser(oldstack);
+	if (aes_present) {
+		graf_mouse(M_ON, NULL);
+		graf_mouse(ARROW, NULL);
+		wind_update(END_MCTRL);
+		wind_update(END_UPDATE);
+		form_dial(FMD_FINISH, 0, 0, 0, 0, desktop.g_x, desktop.g_y, desktop.g_w, desktop.g_h);
+		appl_exit();
+	}
 }
 
 static void getScreenFormat(_THIS, int bpp, Uint32 *rmask, Uint32 *gmask, Uint32 *bmask, Uint32 *amask)
@@ -239,18 +281,36 @@ static int getLineWidth(_THIS, const xbiosmode_t *new_video_mode, int width, int
 	return (NOVA_modes[new_video_mode->number].pitch);
 }
 
+static void vsync(_THIS)
+{
+	/* Don't vsync before swap unless double buffering on gpu */
+	/* Bitblit to single buffer will screen-tear regardless and we need all */
+	/* the performance we can get out of these slow cards */
+	if (XBIOS_screens[0] == XBIOS_screens[1])
+		return;
+
+	NOVA_Vsync(this);
+}
+
 static void swapVbuffers(_THIS)
 {
-	NOVA_SetScreen(this, XBIOS_screens[XBIOS_fbnum]);
+	if (XBIOS_screens[XBIOS_fbnum] != NOVA_xcb->scr_base) {
+		NOVA_SetScreen(this, XBIOS_screens[XBIOS_fbnum]);
+	}
 }
 
 static int allocVbuffers(_THIS, const xbiosmode_t *new_video_mode, int num_buffers, int bufsize)
 {
-	XBIOS_screens[0] = NOVA_xcb->base;
+	XBIOS_screens[0] = XBIOS_screens[1] = NOVA_xcb->base;
+#ifndef DISABLE_NOVA_DOUBLEBUF
 	if (num_buffers>1) {
-		XBIOS_screens[1] = XBIOS_screens[0] + NOVA_xcb->scrn_sze;
+		/* Allow silent fallback to single buffering on the gpu in case */
+		/* there is not enough vram. It is quite limited on these Nova cards */
+		if (NOVA_xcb->mem_size >= (bufsize<<1)) {
+			XBIOS_screens[1] += NOVA_xcb->scrn_sze;
+		}
 	}
-
+#endif
 	return(1);
 }
 
@@ -267,6 +327,25 @@ static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
 	}
 
 	return(1);
+}
+
+static void NOVA_Vsync(_THIS)
+{
+	void *oldstack;
+
+	oldstack = (void *)Super(NULL);
+
+	__asm__ __volatile__ (
+		"movel	%0,%%a0\n\t"
+		"jsr	%%a0@"
+		: /* no return value */
+		: /* input */
+		  "g"(NOVA_xcb->p_vsync)
+		: /* clobbered registers */
+		  "d0", "d1", "d2", "a0", "a1", "cc", "memory"
+		);
+
+	SuperToUser(oldstack);
 }
 
 static void NOVA_SetMode(_THIS, int num_mode)
