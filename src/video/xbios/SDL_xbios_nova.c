@@ -32,6 +32,7 @@
 #include <fcntl.h>
 
 /* Mint includes */
+#include <gem.h>
 #include <mint/cookie.h>
 #include <mint/sysvars.h>
 #include <mint/osbind.h>
@@ -59,6 +60,8 @@ static nova_xcb_t *NOVA_xcb;			/* Pointer to Nova infos */
 static nova_resolution_t *NOVA_modes;	/* Video modes loaded from a file */
 static int NOVA_modecount;				/* Number of loaded modes */
 static unsigned char NOVA_blnk_time;	/* Original blank time */
+static int16_t sav_palette[256 * 3];    /* Original VDI palette */
+static SDL_Color shadow_palette[256];   /* Shadow palette */
 
 /*--- Functions ---*/
 
@@ -112,6 +115,13 @@ void SDL_XBIOS_VideoInit_Nova(_THIS, void *cookie_nova)
 	XBIOS_freeVbuffers = freeVbuffers;
 
 	this->SetColors = setColors;
+
+	for (int i=0; i<256; i++) {
+		shadow_palette[i].r = 0;
+		shadow_palette[i].g = 0;
+		shadow_palette[i].b = 0;
+		shadow_palette[i].unused = 0xff;
+	}
 }
 
 static void XBIOS_DeleteDevice_NOVA(_THIS)
@@ -176,7 +186,14 @@ static void saveMode(_THIS, SDL_PixelFormat *vformat)
 	XBIOS_oldvmode = NOVA_xcb->resolution;
 	XBIOS_oldvbase = NOVA_xcb->scr_base;
 
-	/* TODO: save palette ? */
+	/* save palette */
+	short dummy;
+	int vdi_phys = graf_handle(&dummy, &dummy, &dummy, &dummy);
+	if (vdi_phys > 0 && NOVA_xcb->planes <= 8) {
+		for (int i = 0; i < (1 << NOVA_xcb->planes); i++) {
+			vq_color(vdi_phys, i, 1, &sav_palette[i * 3]);
+		}
+	}
 
 	NOVA_blnk_time = NOVA_xcb->blnk_time;
 	NOVA_xcb->blnk_time = 0;
@@ -193,7 +210,14 @@ static void restoreMode(_THIS)
 	NOVA_SetScreen(this, XBIOS_oldvbase);
 	NOVA_Vsync(this);
 
-	/* TODO: restore palette ? */
+	/* restore palette */
+	short dummy;
+	int vdi_phys = graf_handle(&dummy, &dummy, &dummy, &dummy);
+	if (vdi_phys > 0 && NOVA_xcb->planes <= 8) {
+		for (int i = 0; i < (1 << NOVA_xcb->planes); i++) {
+			vs_color(vdi_phys, i, &sav_palette[i * 3]);
+		}
+	}
 
 	NOVA_xcb->blnk_time = NOVA_blnk_time;
 }
@@ -272,12 +296,25 @@ static void freeVbuffers(_THIS)
 
 static int setColors(_THIS, int firstcolor, int ncolors, SDL_Color *colors)
 {
-	int i;
-
-	for (i=0; i<ncolors; i++) {
-		NOVA_SetColor(this, firstcolor+i,  colors[i].r, colors[i].g, colors[i].b);
+	void* oldstack = (void *)Super(NULL);
+	SDL_Color* pal_dst = &shadow_palette[firstcolor];
+	SDL_Color* pal_src = &colors[firstcolor];
+	for (int i=0; i<ncolors; i++, pal_dst++, pal_src++) {
+		SDL_Color c = *pal_src;
+		c.unused = 0;
+		if (*((unsigned int*)pal_dst) != *((unsigned int*)&c))
+		{
+			__asm__ __volatile__ (
+				"movel	%0,%%d0\n\t"
+				"movel	%1,%%a0\n\t"
+				"movel	%2,%%a1\n\t"
+				"jsr	%%a1@"
+				: : "g"(i), "g"(&c), "g"(NOVA_xcb->p_setcol) : "d0", "d1", "d2", "a0", "a1", "a2", "cc", "memory"
+			);
+		}
 	}
 
+	SuperToUser(oldstack);
 	return(1);
 }
 
